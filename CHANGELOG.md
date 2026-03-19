@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [3.5.5] - 2026-03-05
+### ✨ Added
+- **豆包**
+  - 增加豆包 Pro 模型的支持
+
+### 🐛 Fixed
+- **适配器**
+  - 修复豆包文本被截断的问题
+
+## [3.5.5] - 2026-03-05
 
 ### ✨ Added
 - **自定义**

@@ -31,7 +31,14 @@ async function generate(context, prompt, imgPaths, modelId, meta = {}) {
     const { page } = context;
 
     // 是否使用深度思考模式
-    const useThinking = modelId === 'seed-thinking';
+    const useThinking = modelId === 'seed-thinking' || modelId === 'seed-pro';
+
+    // 模型 ID 到菜单项无障碍名称的映射
+    const MODEL_MENU_MAP = {
+        'seed': 'Fast Solves most questions',
+        'seed-thinking': 'Think Solves more complex problems',
+        'seed-pro': 'Pro Advanced Pro model'
+    };
 
     try {
         logger.info('适配器', '开启新会话...', meta);
@@ -63,7 +70,7 @@ async function generate(context, prompt, imgPaths, modelId, meta = {}) {
 
             try {
                 // 点击上传菜单按钮
-                const uploadMenuBtn = page.locator('main button[aria-haspopup="menu"]').first();
+                const uploadMenuBtn = page.locator('main button[aria-haspopup="menu"]:not(:has(div[data-testid="deep-thinking-action-button"]))').first();
                 await safeClick(page, uploadMenuBtn, { bias: 'button' });
                 await sleep(300, 500);
 
@@ -86,20 +93,21 @@ async function generate(context, prompt, imgPaths, modelId, meta = {}) {
             logger.info('适配器', '图片上传完成', meta);
         }
 
-        // 3. 切换深度思考模式 (如需)
-        const deepThinkBtn = page.locator('div[data-testid="use-deep-thinking-switch-btn"] button');
-        const btnExists = await deepThinkBtn.count() > 0;
+        // 3. 选择模型
+        const modelMenuName = MODEL_MENU_MAP[modelId] || MODEL_MENU_MAP['seed'];
+        logger.debug('适配器', `选择模型: ${modelId} -> ${modelMenuName}`, meta);
 
-        if (btnExists) {
-            const isChecked = await deepThinkBtn.getAttribute('data-checked') === 'true';
+        const modelSelectorBtn = page.locator('div[data-testid="deep-thinking-action-button"]');
+        const selectorExists = await modelSelectorBtn.count() > 0;
 
-            if (useThinking && !isChecked) {
-                logger.debug('适配器', '启用深度思考模式...', meta);
-                await safeClick(page, deepThinkBtn, { bias: 'button' });
-            } else if (!useThinking && isChecked) {
-                logger.debug('适配器', '关闭深度思考模式...', meta);
-                await safeClick(page, deepThinkBtn, { bias: 'button' });
-            }
+        if (selectorExists) {
+            await safeClick(page, modelSelectorBtn, { bias: 'button' });
+            await sleep(300, 500);
+
+            const menuItem = page.getByRole('menuitem', { name: modelMenuName });
+            await menuItem.waitFor({ state: 'visible', timeout: 5000 });
+            await safeClick(page, menuItem, { bias: 'button' });
+            await sleep(200, 400);
         }
 
         // 4. 填写提示词
@@ -212,13 +220,16 @@ function parseSSEResponse(body, useThinking) {
                 try {
                     const data = JSON.parse(dataLine);
 
-                    // SSE_REPLY_END with end_type: 1 包含完整回复
+                    // SSE_REPLY_END with end_type: 1 的 brief 仅作兜底
                     if (eventType === 'SSE_REPLY_END' && data.end_type === 1) {
-                        resultText = data.msg_finish_attr?.brief || '';
+                        const brief = data.msg_finish_attr?.brief || '';
+                        if (!resultText && brief) {
+                            resultText = brief;
+                        }
                     }
 
                     // STREAM_MSG_NOTIFY 检测深度思考块
-                    if (eventType === 'STREAM_MSG_NOTIFY' && useThinking) {
+                    if (eventType === 'STREAM_MSG_NOTIFY') {
                         const blocks = data.content?.content_block || [];
                         for (const block of blocks) {
                             if (block.block_type === 10040 && block.content?.thinking_block) {
@@ -229,28 +240,39 @@ function parseSSEResponse(body, useThinking) {
                     }
 
                     // STREAM_CHUNK 处理内容块
-                    if (eventType === 'STREAM_CHUNK' && useThinking && data.patch_op) {
+                    if (eventType === 'STREAM_CHUNK' && data.patch_op) {
                         for (const op of data.patch_op) {
                             if (op.patch_object === 1 && op.patch_value?.content_block) {
                                 for (const block of op.patch_value.content_block) {
-                                    // 如果有 parent_id 指向 thinking_block，则是思考内容
-                                    if (block.parent_id === thinkingBlockId) {
-                                        const text = block.content?.text_block?.text || '';
-                                        if (text) reasoningText += text;
-                                    }
                                     // 思考块结束标记
                                     if (block.block_type === 10040 && block.is_finish) {
                                         inThinkingBlock = false;
+                                    }
+                                    // 思考内容 (parent_id 指向 thinking_block)
+                                    if (useThinking && block.parent_id === thinkingBlockId) {
+                                        const text = block.content?.text_block?.text || '';
+                                        if (text) reasoningText += text;
+                                    }
+                                    // 正文内容 (block_type 10000，非思考子块)
+                                    else if (block.block_type === 10000 && block.parent_id !== thinkingBlockId) {
+                                        const text = block.content?.text_block?.text || '';
+                                        if (text) resultText += text;
                                     }
                                 }
                             }
                         }
                     }
 
-                    // CHUNK_DELTA 增量文本 (思考过程中的增量)
-                    if (eventType === 'CHUNK_DELTA' && useThinking && inThinkingBlock) {
+                    // CHUNK_DELTA 增量文本
+                    if (eventType === 'CHUNK_DELTA') {
                         const text = data.text || '';
-                        if (text) reasoningText += text;
+                        if (text) {
+                            if (useThinking && inThinkingBlock) {
+                                reasoningText += text;
+                            } else {
+                                resultText += text;
+                            }
+                        }
                     }
 
                 } catch (e) {
@@ -277,7 +299,8 @@ export const manifest = {
 
     models: [
         { id: 'seed', imagePolicy: 'optional', type: 'text' },
-        { id: 'seed-thinking', imagePolicy: 'optional', type: 'text' }
+        { id: 'seed-thinking', imagePolicy: 'optional', type: 'text' },
+        { id: 'seed-pro', imagePolicy: 'optional', type: 'text' }
     ],
 
     navigationHandlers: [],
