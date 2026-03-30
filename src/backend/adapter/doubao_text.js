@@ -34,11 +34,11 @@ async function generate(context, prompt, imgPaths, modelId, meta = {}) {
     // 是否使用深度思考模式
     const useThinking = modelId === 'seed-thinking' || modelId === 'seed-pro';
 
-    // 模型 ID 到菜单项无障碍名称的映射
+    // 模型 ID 到菜单项无障碍名称的正则表达式映射（兼容英文、简繁体中文）
     const MODEL_MENU_MAP = {
-        'seed': 'Fast Solves most questions',
-        'seed-thinking': 'Think Solves more complex problems',
-        'seed-pro': 'Pro Advanced Pro model'
+        'seed': /Fast Solves most questions|快速 适用于大部分情况|快速 適用於大部分情況/,
+        'seed-thinking': /Think Solves more complex problems|思考 擅长解决更难的问题|思考 擅長解決更難的問題/,
+        'seed-pro': /Pro Advanced Pro model|专家 研究级智能模型|專家 研究級智慧模型/
     };
 
     try {
@@ -71,7 +71,10 @@ async function generate(context, prompt, imgPaths, modelId, meta = {}) {
 
             try {
                 // 点击上传菜单按钮
-                const uploadMenuBtn = page.locator('button[aria-haspopup="menu"]:not(:has(div[data-testid="deep-thinking-action-button"]))').first();
+                const uploadMenuBtn = page.locator('#input-engine-container button[aria-haspopup="menu"]')
+                    .filter({ hasNot: page.locator('[data-testid="deep-thinking-action-button"], [data-testid="mode-select-action-button"]') })
+                    .first()
+                    .locator('button');
                 await safeClick(page, uploadMenuBtn, { bias: 'button' });
                 await sleep(300, 500);
 
@@ -87,6 +90,9 @@ async function generate(context, prompt, imgPaths, modelId, meta = {}) {
                         return false;
                     }
                 }, meta);
+            } catch (uploadErr) {
+                logger.error('适配器', `图片上传失败: ${uploadErr.message}`, meta);
+                // 不抛出异常，继续尝试发送纯文本
             } finally {
                 page.off('response', applyUploadHandler);
             }
@@ -96,10 +102,10 @@ async function generate(context, prompt, imgPaths, modelId, meta = {}) {
 
         // 3. 选择模型
         const modelMenuName = MODEL_MENU_MAP[modelId] || MODEL_MENU_MAP['seed'];
-        logger.debug('适配器', `选择模型: ${modelId} -> ${modelMenuName}`, meta);
+        logger.debug('适配器', `选择模型: ${modelId} -> ${String(modelMenuName)}`, meta);
 
         // 给予 3 秒的缓冲时间等待 React 渲染按钮
-        const modelSelectorBtn = page.locator('button[aria-haspopup="menu"]:has(div[data-testid="deep-thinking-action-button"])').first();
+        const modelSelectorBtn = page.locator('button[aria-haspopup="menu"]:visible:has([data-testid="deep-thinking-action-button"], [data-testid="mode-select-action-button"])').first();
         let selectorExists = false;
         try {
             await modelSelectorBtn.waitFor({ state: 'attached', timeout: 3000 });

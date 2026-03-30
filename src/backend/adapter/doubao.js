@@ -261,7 +261,7 @@ export const manifest = {
     models: [
         { id: 'seedream-4.5', codeName: 'Seedream 4.5', imagePolicy: 'optional' },
         { id: 'seedream-4.0', codeName: 'Seedream 4.0', imagePolicy: 'optional' },
-        { id: 'seedream-3.0', codeName: 'Seedream 3.0', imagePolicy: 'optional' }
+        { id: 'seedream-5.0-lite', codeName: 'Seedream 5.0 Lite', imagePolicy: 'optional' }
     ],
 
     navigationHandlers: [],
