@@ -124,6 +124,7 @@ async function generate(context, prompt, imgPaths, modelId, meta = {}) {
                     const contentType = response.headers()['content-type'] || '';
                     if (!contentType.includes('text/event-stream')) return;
 
+                    await response.finished();
                     const body = await response.text();
                     const extractedUrl = parseSSEForImage(body);
 
@@ -184,26 +185,44 @@ async function generate(context, prompt, imgPaths, modelId, meta = {}) {
 
 /**
  * 解析 SSE 响应，提取图片链接
+ * SSE 格式: data: {"event_data": "<json_string>", "event_type": 2001}
+ * event_data 解析后: {"message": {"content_type": 2074, "content": "<json_string>"}}
+ * content 解析后: {"creations": [{"image": {"image_ori_raw": {"url": "..."}}}]}
  * @param {string} body - SSE 响应体
  * @returns {string|null} 图片 URL
  */
 function parseSSEForImage(body) {
     const lines = body.split('\n');
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
 
-        if (line.startsWith('data:')) {
-            const dataLine = line.substring(5).trim();
-            if (!dataLine || dataLine === '{}') continue;
+        const dataStr = trimmed.substring(5).trim();
+        if (!dataStr || dataStr === '{}') continue;
 
-            try {
-                const data = JSON.parse(dataLine);
-                const url = extractRawImage(data);
-                if (url) return url;
-            } catch (e) {
-                // JSON 解析失败，跳过
+        try {
+            const data = JSON.parse(dataStr);
+
+            // 新格式: event_data 嵌套结构
+            if (data.event_data) {
+                const eventData = typeof data.event_data === 'string'
+                    ? JSON.parse(data.event_data) : data.event_data;
+                const message = eventData?.message;
+                if (message?.content_type === 2074 && message.content) {
+                    const content = typeof message.content === 'string'
+                        ? JSON.parse(message.content) : message.content;
+                    const url = extractRawImage(content);
+                    if (url) return url;
+                }
+                continue;
             }
+
+            // 旧格式: patch_op 扁平结构 (兼容)
+            const url = extractRawImage(data);
+            if (url) return url;
+        } catch (e) {
+            // JSON 解析失败，跳过
         }
     }
 
@@ -212,34 +231,36 @@ function parseSSEForImage(body) {
 
 /**
  * 从 SSE 消息数据中提取原图 Raw 链接
+ * 支持两种格式:
+ * - patch_op 格式: {patch_op: [{patch_value: {content_block: [{block_type: 2074, content: {creation_block: {creations: [...]}}}]}}]}
+ * - creations 格式: {creations: [{image: {image_ori_raw: {url: "..."}}}]}
  * @param {Object} sseData - 解析后的 data JSON 对象
  * @returns {string|null} - 返回图片 URL 或 null
  */
 function extractRawImage(sseData) {
-    if (!sseData || !sseData.patch_op || !Array.isArray(sseData.patch_op)) {
-        return null;
-    }
+    if (!sseData) return null;
 
-    for (const op of sseData.patch_op) {
-        const contentBlocks = op.patch_value?.content_block;
+    // 格式 1: patch_op 结构
+    if (Array.isArray(sseData.patch_op)) {
+        for (const op of sseData.patch_op) {
+            const contentBlocks = op.patch_value?.content_block;
 
-        if (Array.isArray(contentBlocks)) {
-            for (const block of contentBlocks) {
-                // block_type 2074 代表生成卡片
-                if (block.block_type === 2074) {
-                    const creations = block.content?.creation_block?.creations;
-
-                    if (Array.isArray(creations)) {
-                        for (const creation of creations) {
-                            // 提取 image_ori_raw，只有图片生成完成时才会出现
-                            const rawUrl = creation.image?.image_ori_raw?.url;
-                            if (rawUrl) {
-                                return rawUrl;
-                            }
-                        }
+            if (Array.isArray(contentBlocks)) {
+                for (const block of contentBlocks) {
+                    if (block.block_type === 2074) {
+                        const url = extractRawImage(block.content?.creation_block);
+                        if (url) return url;
                     }
                 }
             }
+        }
+    }
+
+    // 格式 2: creations 直接结构
+    if (Array.isArray(sseData.creations)) {
+        for (const creation of sseData.creations) {
+            const rawUrl = creation.image?.image_ori_raw?.url;
+            if (rawUrl) return rawUrl;
         }
     }
 
